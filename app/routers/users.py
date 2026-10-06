@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.core.database import get_db
 from app.crud.user import (
@@ -28,7 +29,17 @@ def update_my_profile(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return update_profile(db, current_user, update_in)
+    try:
+        return update_profile(db, current_user, update_in)
+    except IntegrityError as e:
+        db.rollback()
+        error_msg = str(e.orig) if e.orig else str(e)
+        if "ix_users_phone_number" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail="This phone number is already registered to another user."
+            )
+        raise HTTPException(status_code=400, detail="Database constraint violation.")
 
 
 @router.patch("/me/password", status_code=status.HTTP_204_NO_CONTENT)
@@ -61,4 +72,21 @@ def create_staff(staff_in: StaffCreate, db: Session = Depends(get_db)):
     if existing is not None:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    return create_staff_user(db, staff_in)
+    try:
+        return create_staff_user(db, staff_in)
+    except IntegrityError as e:
+        db.rollback() # Abort the failed transaction
+        
+        # Check specifically for the phone number constraint violation
+        error_msg = str(e.orig) if e.orig else str(e)
+        if "ix_users_phone_number" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail="A user with this phone number already exists."
+            )
+            
+        # Catch-all for any other unexpected integrity errors
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="A user with these credentials already exists."
+        )
